@@ -2,95 +2,95 @@ import pandas as pd
 import numpy as np
 
 from hmmlearn.hmm import GaussianHMM
-from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
 
-#### a Realized Covariances:####
 
-import pandas as pd
-import numpy as np
+class MarketRegime:
+    def __init__(self, df: pd.DataFrame):
+        self.df = df.copy()
 
-
-#### HMM ### ##
-
-class MarketRegime ():
-    def __init__(self, 
-                 df: pd.DataFrame,
-                 ):
-        self.df = df
-        pass
-    
-    #### HMM #####
-    def _train_HMM (self, 
-                    window_size: int):
+    # -------------------------------
+    # HMM training
+    # -------------------------------
+    def _train_HMM(self, window_size: int):
         self.df['log_ret'] = np.log(self.df['close']).diff()
-        self.df['vol'] = self.df['log_ret'].rolling(window_size).std()  # short-term vol
+        self.df['vol'] = self.df['log_ret'].rolling(window_size).std()
         features = self.df[['log_ret', 'vol']].dropna()
-        model = GaussianHMM(n_components=3, covariance_type="full", n_iter=1000, random_state=42)
+
+        model = GaussianHMM(
+            n_components=3,
+            covariance_type="full",
+            n_iter=1000,
+            random_state=42
+        )
         model.fit(features)
         return model
-    
-    def _regime_HMM (self,
-                     window_size: int,
-                     df_predict: pd.DataFrame,
-                     model):
+
+    def _regime_HMM(self, window_size: int, df_predict: pd.DataFrame, model):
+        df_predict = df_predict.copy()
         df_predict['log_ret'] = np.log(df_predict['close']).diff()
-        df_predict['vol'] = self.df['log_ret'].rolling(window_size).std()  # short-term vol
+        df_predict['vol'] = df_predict['log_ret'].rolling(window_size).std()
+
         features = df_predict[['log_ret', 'vol']].dropna()
         hidden_states = model.predict(features)
-        df_predict =  df_predict.loc[features.index].copy()
+
+        df_predict = df_predict.loc[features.index].copy()
         df_predict['regime'] = hidden_states
         return df_predict
-    
-    ### Slope clustering ####
 
-    def _train_SlopeCluster (self, 
-                             window_size:int,
-                             window_size_rolling:int,
-                             ):
-        
-        self.df['ma34'] = self.df['close'].rolling(34).mean()
-        self.df = self.df.dropna()
-        timestamps = np.arange(window_size).reshape(-1, 1)
-        slopes = []
-        for i in range(window_size, len(self.df)):
-            y = self.df['ma34'].values[i-window_size:i]
-            X = timestamps
-            reg = LinearRegression().fit(X, y)
-            slopes.append(reg.coef_[0])
-        self.df = self.df.iloc[window_size:].copy()
+    # -------------------------------
+    # Slope clustering (t vs t-2 slope)
+    # -------------------------------
+    def _train_SlopeCluster(self, window_size: int, window_size_rolling: int):
+        # 1. Compute MA34
+        self.df['ma34'] = self.df['close'].rolling(window_size_rolling).mean()
+        self.df = self.df.dropna().reset_index(drop=True)
+
+        # 2. Compute slope (t vs t-2)
+        slopes = [np.nan, np.nan]
+        for i in range(2, len(self.df)):
+            slope = (self.df['ma34'].iloc[i] - self.df['ma34'].iloc[i - 2]) / 2
+            slopes.append(slope)
+
         self.df['slope'] = slopes
-        # 4. Cluster slopes into regimes (3 clusters)
+
+        # 3. Drop warm-up
+        self.df = self.df.iloc[window_size:].copy().reset_index(drop=True)
+
+        # 4. Fit KMeans
         num_clusters = 3
-        X = self.df[['slope']].values
+        X = self.df[['slope']].dropna().values
         slopecluster = KMeans(n_clusters=num_clusters, random_state=42).fit(X)
-        return slopecluster 
-    
+
+        # 5. Assign labels
+        self.df.loc[self.df['slope'].notna(), 'regime'] = slopecluster.labels_
+
+        return slopecluster
+
     def _regime_SlopeCluster(self,
-                             window_size:int,
-                             window_size_rolling:int,
+                             window_size: int,
+                             window_size_rolling: int,
                              df_predict: pd.DataFrame,
                              cluster_model):
+        df_predict = df_predict.copy()
+
+        # 1. Compute MA34
         df_predict['ma34'] = df_predict['close'].rolling(window_size_rolling).mean()
-        df_predict = df_predict.dropna()
-        timestamps = np.arange(window_size).reshape(-1, 1)
-        slopes = []
-        for i in range(window_size, len(df_predict)):
-            y = df_predict['ma34'].values[i-window_size:i]
-            X = timestamps
-            reg = LinearRegression().fit(X, y)
-            slopes.append(reg.coef_[0])
-        df_predict = df_predict.iloc[window_size:].copy()
+        df_predict = df_predict.dropna().reset_index(drop=True)
+
+        # 2. Compute slope (t vs t-2)
+        slopes = [np.nan, np.nan]
+        for i in range(2, len(df_predict)):
+            slope = (df_predict['ma34'].iloc[i] - df_predict['ma34'].iloc[i - 2]) / 2
+            slopes.append(slope)
+
         df_predict['slope'] = slopes
-        df_predict['regime'] = cluster_model.labels_
+
+        # 3. Drop warm-up
+        df_predict = df_predict.iloc[window_size:].copy().reset_index(drop=True)
+
+        # 4. Predict regime
+        X_pred = df_predict[['slope']].dropna().values
+        df_predict.loc[df_predict['slope'].notna(), 'regime'] = cluster_model.predict(X_pred)
+
         return df_predict
-    
-
-
-
-
-
-
-        
-    
-
