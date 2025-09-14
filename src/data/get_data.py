@@ -60,3 +60,41 @@ def fetch_mt5_data_between_dates(symbol: str = "EURUSD",
     data.columns = data.columns.str.lower()
 
     return data
+
+
+import datetime
+import pandas as pd
+import yfinance as yf
+
+def get_ohlcv(ticker="SPY", period="600d", interval="4h", offset_hours=0):
+    """
+    Download OHLCV data from Yahoo Finance and aggregate into 4-hour bars.
+
+    Args:
+        ticker (str): Stock/ETF ticker (default: "SPY").
+        period (str): Lookback period (e.g., "600d", "1y").
+        interval (str): Interval for data (e.g., "1h", "4h").
+        offset_hours (int): Time offset in hours (to align with market open).
+
+    Returns:
+        pd.DataFrame: Aggregated OHLCV data (4h bars).
+    """
+    # Download data
+    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True)
+    df.dropna(inplace=True)
+    df.columns = [col[0].lower() for col in df.columns]
+
+    # Define OHLC aggregation
+    ohlc = {
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }
+
+    # Aggregate with resample
+    offset = datetime.timedelta(hours=offset_hours)
+    df_agg = df.resample("4H", origin="epoch", offset=offset).apply(ohlc)
+
+    return df_agg
