@@ -85,70 +85,45 @@ class CoiledSpringEMAConvergenceStrategy:
         return signals
 
 
+class Dip_Tip_MA_Convergence_H4_to_H1:
+    def __init__(self, ema_periods=(34, 55, 84), convergence_threshold=0.001, price_tolerance=0.005):
+        self.ema_periods = ema_periods
+        self.convergence_threshold = convergence_threshold
+        self.price_tolerance = price_tolerance
 
-class Dip_Tip_MA_Convergence():
-    def __int__(self):
-        pass
+    @staticmethod
+    def ema(series: pd.Series, period: int) -> pd.Series:
+        return series.ewm(span=period, adjust=False).mean()
 
-    def calculate_MA_fibo(self, 
-                          df:pd.DataFrame):
-        ema_periods = [34, 55, 84]
-         # Calculate EMAs
-        for p in ema_periods:
-            df[f'ema_{p}'] = df['close'].ewm(span=p, adjust=False).mean()
+    def compute_emas(self, df: pd.DataFrame) -> pd.DataFrame:
+     
+        for p in self.ema_periods:
+            df[f'ema_{p}'] = self.ema(df['close'], p)
+        df['ema_mid'] = df[[f'ema_{p}' for p in self.ema_periods]].mean(axis=1)
+        df['max_ema_gap'] = df[[f'ema_{p}' for p in self.ema_periods]].max(axis=1) - \
+                            df[[f'ema_{p}' for p in self.ema_periods]].min(axis=1)
+        df['ema_converged'] = df['max_ema_gap'] / df['ema_mid'] < self.convergence_threshold
         return df
-    
-    def generate_signal(self, 
-                        row,
-                        price):
-        if row['regime'] == 'bearish' and  row['ema_intersection'] and abs(row['close'] - row['min_ema'])<=price:
-            return 'buy'
-        elif row['bullish'] == 'bearish' and  row['ema_intersection'] and abs(row['close'] - row['min_ema'])<=price:
-            return 'sell'
-        else:
-            return 0
- 
 
-    def signal_MA_convergence(self, 
-                                 df:pd.DataFrame):
+    def generate_signals(self, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> pd.DataFrame:
         
-        # # Check if Close is above all EMAs
-        df['above_all_ema'] = (df['close'] > df['ema_34']) & (df['close'] > df['ema_55']) & (df['close'] > df['ema_84'])
+        df_4h = self.compute_emas(df_4h)
 
-        # Check if Close is below all EMAs
-        df['below_all_ema'] = (df['close'] < df['ema_34']) & (df['close'] < df['ema_55']) & (df['close'] < df['ema_84'])
+        # Danh sách mức kháng cự từ H4
+        resistance_levels = df_4h.loc[df_4h['ema_converged'], 'ema_mid'].tolist()
 
+        # Tạo cột tín hiệu H1
+        df_1h['signal'] = False
 
-        df['gap_ema_34'] = abs( df['close'] - df['ema_34'])
-        df['gap_ema_55'] = abs(df['close'] - df['ema_55'])
-        df['gap_ema_84'] = abs(df['close'] - df['ema_84'])
-        df['min_gap_to_ema'] = df[['gap_ema_34', 'gap_ema_55', 'gap_ema_84']].min(axis=1)
+        for i in range(len(df_1h)):
+            price = df_1h['close'].iloc[i]
+            # Nếu giá H1 rơi về gần bất kỳ mức kháng cự H4 trước đó
+            for lvl in resistance_levels:
+                if abs(price - lvl) / price <= self.price_tolerance:
+                    df_1h.at[df_1h.index[i], 'signal'] = True
+                    break
 
-
-        # Calculate absolute gaps between EMAs
-        df['gap_34_55'] = abs(df['ema_34'] - df['ema_55'])
-        df['gap_34_84'] = abs(df['ema_34'] - df['ema_84'])
-        df['gap_55_84'] = abs(df['ema_55'] - df['ema_84'])
-
-        # Find the maximum gap between any two EMAs
-        df['max_ema_gap'] = df[['gap_34_55', 'gap_34_84', 'gap_55_84']].max(axis=1)
-
-        # Define "intersection" where all EMAs are very close (gap <= 5)
-        df['ema_intersection'] = df['max_ema_gap'] <1
-
-        # find min price
-        df['min_ema'] = df[['ema_34, ema_55, ema_84']].min(axis=1)
-
-
-        # Create signal column
-        df['signal'] = 0
-
-
-        df['position'] = df.apply(self.generate_signal, axis=1)
-
-
-        return df
-
+        return df_1h
 
         
         

@@ -58,6 +58,7 @@ def fetch_mt5_data_between_dates(symbol: str = "EURUSD",
     data = pd.DataFrame(rates)
     data['time'] = pd.to_datetime(data['time'], unit='s')
     data.columns = data.columns.str.lower()
+    data['volume'] = data['tick_volume']
 
     return data
 

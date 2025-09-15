@@ -1,136 +1,140 @@
 import pandas as pd
-import numpy as pd
+import matplotlib.pyplot as plt
+import numpy as np
 
+class Backtester:
+    def __init__(self, df_1h_csp: pd.DataFrame, df_regime: pd.DataFrame, stoploss: float = 50):
+        self.df_1h_csp = df_1h_csp.copy()
+        self.df_regime = df_regime.copy()
+        self.stoploss = stoploss
+        self.df = None
+        self.cumulative_return = None
 
-class Coiled_Spring_MA_Convergence:
-    def __int__(self):
-        pass
+    def merge_data(self):
+        """Đồng bộ time giữa dữ liệu 1H và regime 4H"""
+        self.df = pd.merge_asof(
+            self.df_1h_csp.sort_values("time"),
+            self.df_regime[["regime_labels"]].sort_index(),
+            left_on="time", right_index=True, direction="backward"
+        )
+        return self.df
 
-    def calculate_MA_fibo(self, 
-                          df:pd.DataFrame):
-        ema_periods = [34, 55, 84]
-         # Calculate EMAs
-        for p in ema_periods:
-            df[f'ema_{p}'] = df['close'].ewm(span=p, adjust=False).mean()
-        return df
-    
-    def generate_signal(self, row):
-        if row['above_all_ema'] and (1 <= row['min_gap_to_ema'] <= 5) and row['ema_intersection'] and  row['volume_spike']:
-            return 'buy'
-        elif row['below_all_ema'] and (1 <= row['min_gap_to_ema'] <= 5) and row['ema_intersection'] and row['volume_spike']:
-            return 'sell'
-        else:
-            return 0
+    def run_backtest(self):
+        """Chạy backtest theo logic vào/ra lệnh"""
+        if self.df is None:
+            self.merge_data()
 
+        in_position = False
+        entry_price = None
+        positions = []
+        buy_signal = []
+        exit_signal = []
 
-    def signal_MA_convergence(self, 
-                                 df:pd.DataFrame):
-        
-        # # Check if Close is above all EMAs
-        df['above_all_ema'] = (df['close'] > df['ema_34']) & (df['close'] > df['ema_55']) & (df['close'] > df['ema_84'])
+        for _, row in self.df.iterrows():
+            if not in_position and row["signal"] == "BUY":
+                in_position = True
+                entry_price = row["close"]
+                positions.append(1)
+                buy_signal.append(True)
+                exit_signal.append(False)
 
-        # Check if Close is below all EMAs
-        df['below_all_ema'] = (df['close'] < df['ema_34']) & (df['close'] < df['ema_55']) & (df['close'] < df['ema_84'])
+            elif in_position:
+                # Thoát khi Bear regime
+                if row["regime_labels"] == "Bear - decrease":
+                    in_position = False
+                    entry_price = None
+                    positions.append(0)
+                    buy_signal.append(False)
+                    exit_signal.append(True)
+                # Thoát khi stoploss
+                elif row["close"] <= entry_price - self.stoploss:
+                    in_position = False
+                    entry_price = None
+                    positions.append(0)
+                    buy_signal.append(False)
+                    exit_signal.append(True)
+                else:
+                    positions.append(1)
+                    buy_signal.append(False)
+                    exit_signal.append(False)
+            else:
+                positions.append(0)
+                buy_signal.append(False)
+                exit_signal.append(False)
 
+        self.df["position"] = positions
+        self.df["buy_signal"] = buy_signal
+        self.df["exit_signal"] = exit_signal
 
-        df['gap_ema_34'] = abs( df['close'] - df['ema_34'])
-        df['gap_ema_55'] = abs(df['close'] - df['ema_55'])
-        df['gap_ema_84'] = abs(df['close'] - df['ema_84'])
-        df['min_gap_to_ema'] = df[['gap_ema_34', 'gap_ema_55', 'gap_ema_84']].min(axis=1)
+        # Strategy returns
+        self.df["return"] = self.df["close"].pct_change()
+        self.df["strategy_return"] = self.df["return"] * self.df["position"]
+        self.cumulative_return = (1 + self.df["strategy_return"]).cumprod()
+        return self.df
 
+    def total_return(self):
+        """Trả về tổng lợi nhuận của chiến lược"""
+        if self.cumulative_return is None:
+            raise ValueError("Bạn cần chạy run_backtest() trước.")
+        return self.cumulative_return.iloc[-1]
 
-        # Calculate absolute gaps between EMAs
-        df['gap_34_55'] = abs(df['ema_34'] - df['ema_55'])
-        df['gap_34_84'] = abs(df['ema_34'] - df['ema_84'])
-        df['gap_55_84'] = abs(df['ema_55'] - df['ema_84'])
+    def sharpe_ratio(self, risk_free_rate: float = 0.0, annualize: bool = True):
+        """Tính Sharpe Ratio"""
+        if self.df is None or "strategy_return" not in self.df:
+            raise ValueError("Bạn cần chạy run_backtest() trước.")
 
-        # Find the maximum gap between any two EMAs
-        df['max_ema_gap'] = df[['gap_34_55', 'gap_34_84', 'gap_55_84']].max(axis=1)
+        excess_return = self.df["strategy_return"] - risk_free_rate
+        mean_return = excess_return.mean()
+        std_return = excess_return.std()
 
-        # Define "intersection" where all EMAs are very close (gap <= 5)
-        df['ema_intersection'] = df['max_ema_gap'] <1
+        if std_return == 0:
+            return np.nan
 
-        # volumne ratio:
-        df['volume_spike'] = ((df['volume'] - df['volume'].shift(1)) / df['volume'].shift(1)) > 0.5
+        sharpe = mean_return / std_return
 
-        # Create signal column
-        df['signal'] = 0
-        df['position'] = df.apply(self.generate_signal, axis=1)
+        if annualize:
+            # Với dữ liệu 1H, ta giả sử 252 ngày * 24h = 6048 nến/năm
+            sharpe *= np.sqrt(252 * 24)
 
+        return sharpe
 
-        return df
+    def plot_results(self):
+        """Vẽ chart Price + Signals và Cumulative Return"""
+        if self.df is None or self.cumulative_return is None:
+            raise ValueError("Bạn cần chạy run_backtest() trước.")
 
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(14, 10), sharex=True,
+            gridspec_kw={'height_ratios': [3, 1]}
+        )
 
-class Dip_Tip_MA_Convergence()):
-    def __int__(self):
-        pass
+        # 1️⃣ Biểu đồ giá + EMA
+        ax1.plot(self.df["time"], self.df["close"], label="Close", color="black", alpha=0.6)
+        if "EMA34" in self.df:  # tránh lỗi nếu EMA chưa có
+            ax1.plot(self.df["time"], self.df["EMA34"], label="EMA34", color="blue", linewidth=1.2)
+        if "EMA55" in self.df:
+            ax1.plot(self.df["time"], self.df["EMA55"], label="EMA55", color="orange", linewidth=1.2)
+        if "EMA84" in self.df:
+            ax1.plot(self.df["time"], self.df["EMA84"], label="EMA84", color="purple", linewidth=1.2)
 
-    def calculate_MA_fibo(self, 
-                          df:pd.DataFrame):
-        ema_periods = [34, 55, 84]
-         # Calculate EMAs
-        for p in ema_periods:
-            df[f'ema_{p}'] = df['close'].ewm(span=p, adjust=False).mean()
-        return df
-    
-    def generate_signal(self, 
-                        row,
-                        price):
-        if row['regime'] == 'bearish' and  row['ema_intersection'] and abs(row['close'] - row['min_ema'])<=price:
-            return 'buy'
-        elif row['bullish'] == 'bearish' and  row['ema_intersection'] and abs(row['close'] - row['min_ema'])<=price:
-            return 'sell'
-        else:
-            return 0
- 
+        # Buy signals
+        ax1.scatter(self.df.loc[self.df["buy_signal"], "time"],
+                    self.df.loc[self.df["buy_signal"], "close"],
+                    marker="^", color="green", s=100, label="Buy")
 
-    def signal_MA_convergence(self, 
-                                 df:pd.DataFrame):
-        
-        # # Check if Close is above all EMAs
-        df['above_all_ema'] = (df['close'] > df['ema_34']) & (df['close'] > df['ema_55']) & (df['close'] > df['ema_84'])
+        # Exit signals
+        ax1.scatter(self.df.loc[self.df["exit_signal"], "time"],
+                    self.df.loc[self.df["exit_signal"], "close"],
+                    marker="v", color="red", s=100, label="Exit")
 
-        # Check if Close is below all EMAs
-        df['below_all_ema'] = (df['close'] < df['ema_34']) & (df['close'] < df['ema_55']) & (df['close'] < df['ema_84'])
+        ax1.set_title("Price + EMA + Buy/Exit Signals")
+        ax1.legend()
 
+        # 2️⃣ Biểu đồ Strategy Return
+        ax2.plot(self.df["time"], self.cumulative_return, label="Strategy Return", color="green")
+        ax2.axhline(1, color="gray", linestyle="--", linewidth=1)
+        ax2.set_title(f"Cumulative Strategy Return | Sharpe: {self.sharpe_ratio():.2f}")
+        ax2.legend()
 
-        df['gap_ema_34'] = abs( df['close'] - df['ema_34'])
-        df['gap_ema_55'] = abs(df['close'] - df['ema_55'])
-        df['gap_ema_84'] = abs(df['close'] - df['ema_84'])
-        df['min_gap_to_ema'] = df[['gap_ema_34', 'gap_ema_55', 'gap_ema_84']].min(axis=1)
-
-
-        # Calculate absolute gaps between EMAs
-        df['gap_34_55'] = abs(df['ema_34'] - df['ema_55'])
-        df['gap_34_84'] = abs(df['ema_34'] - df['ema_84'])
-        df['gap_55_84'] = abs(df['ema_55'] - df['ema_84'])
-
-        # Find the maximum gap between any two EMAs
-        df['max_ema_gap'] = df[['gap_34_55', 'gap_34_84', 'gap_55_84']].max(axis=1)
-
-        # Define "intersection" where all EMAs are very close (gap <= 5)
-        df['ema_intersection'] = df['max_ema_gap'] <1
-
-        # find min price
-        df['min_ema'] = df[['ema_34, ema_55, ema_84']].min(axis=1)
-
-
-        # Create signal column
-        df['signal'] = 0
-
-
-        df['position'] = df.apply(self.generate_signal, axis=1)
-
-
-        return df
-
-
-        
-        
-
-
-        
-            
-        
-
-        
+        plt.tight_layout()
+        plt.show()
