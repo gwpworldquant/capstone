@@ -1,6 +1,9 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+from datetime import datetime
+
 
 class Backtester:
     def __init__(self, df_1h_csp: pd.DataFrame, df_regime: pd.DataFrame, stoploss: float = 50):
@@ -180,3 +183,140 @@ class Backtester:
 
         plt.tight_layout()
         plt.show()
+
+
+class BacktesterRL:
+    def __init__(self, model, env, transaction_cost=0.0005, output_dir="results"):
+        self.model = model
+        self.env = env
+        self.tc = transaction_cost
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def run(self, X_test, next_return_test, y_signal_test=None, times_test=None, prices_test=None):
+        # Build test environment
+        test_env = self.env.__class__(
+            X_seq=X_test,
+            next_returns=next_return_test,
+            y_signal=y_signal_test,
+            prices=prices_test,
+            transaction_cost=self.tc,
+            include_signal_in_state=self.env.include_signal_in_state
+        )
+
+        # Run policy
+        obs, _ = test_env.reset()
+        actions, rewards, positions = [], [], []
+        while True:
+            action, _ = self.model.predict(obs, deterministic=True)
+            obs, r, done, truncated, info = test_env.step(action)
+            actions.append(int(action))
+            rewards.append(float(r))
+            positions.append(info.get("position", 0))
+            if done:
+                break
+
+        # Convert to arrays
+        actions = np.array(actions)
+        rewards = np.array(rewards)
+        positions = np.array(positions)
+        cum_log_returns = np.cumsum(rewards)
+        wealth = np.exp(cum_log_returns)
+
+        # Compute benchmarks
+        wealth_bh = self._buy_and_hold(next_return_test, len(rewards))
+        wealth_signal = self._signal_benchmark(next_return_test, y_signal_test, len(rewards)) if y_signal_test is not None else None
+
+        # Compute metrics
+        stats = self._compute_stats(rewards, positions, cum_log_returns)
+
+        # Save results
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_path = os.path.join(self.output_dir, f"backtest_{ts}.npz")
+        np.savez_compressed(
+            result_path,
+            actions=actions,
+            rewards=rewards,
+            positions=positions,
+            cum_log_returns=cum_log_returns,
+            wealth=wealth,
+            wealth_bh=wealth_bh,
+            wealth_signal=wealth_signal,
+            times=times_test[:len(rewards)] if times_test is not None else None,
+            prices=prices_test[:len(rewards)] if prices_test is not None else None
+        )
+
+        # Plot
+        self._plot(wealth, wealth_bh, wealth_signal, ts)
+
+        return {
+            "agent": stats,
+            "plot": os.path.join(self.output_dir, f"backtest_plot_{ts}.png"),
+            "saved_npz": result_path
+        }
+
+    def _buy_and_hold(self, next_return_test, length):
+        br = next_return_test[:length].astype(float)
+        br[0] -= self.tc  # initial cost
+        return np.exp(np.cumsum(br))
+
+    def _signal_benchmark(self, next_return_test, y_signal_test, length):
+        sig = y_signal_test[:length].astype(int)
+        positions_sig = np.where(sig == 1, 1.0, 0.0)
+        prev_pos = 0.0
+        rew_sig = []
+        for i, pos in enumerate(positions_sig):
+            r_sig = pos * next_return_test[i] - self.tc * abs(pos - prev_pos)
+            rew_sig.append(r_sig)
+            prev_pos = pos
+        rew_sig = np.array(rew_sig)
+        return np.exp(np.cumsum(rew_sig))
+
+    def _compute_stats(self, rewards, positions, cum_log_returns):
+        final_log = float(cum_log_returns[-1])
+        final_wealth = float(np.exp(final_log))
+        final_return = final_wealth - 1.0
+        win_rate = float(np.mean(rewards > 0))
+        sharpe = float(np.mean(rewards) / (np.std(rewards) + 1e-8))
+        return_to_risk = final_return / (np.std(rewards) + 1e-8)
+
+        # Average trade duration
+        trades, cur_len, prev_pos = [], 0, 0
+        for pos in positions:
+            if pos != 0:
+                cur_len += 1
+                if prev_pos == 0:
+                    cur_len = 1
+            else:
+                if prev_pos != 0:
+                    trades.append(cur_len)
+                    cur_len = 0
+            prev_pos = pos
+        if cur_len > 0:
+            trades.append(cur_len)
+        avg_trade_duration = float(np.mean(trades)) if trades else 0.0
+
+        return {
+            "final_return": final_return,
+            "final_wealth": final_wealth,
+            "win_rate": win_rate,
+            "sharpe_ratio": sharpe,
+            "return_to_risk": return_to_risk,
+            "avg_trade_duration": avg_trade_duration
+        }
+
+    def _plot(self, wealth, wealth_bh, wealth_signal, ts):
+        plt.figure(figsize=(10, 6))
+        plt.plot(wealth, label="RL Agent")
+        plt.plot(wealth_bh, label="Buy & Hold")
+        if wealth_signal is not None:
+            plt.plot(wealth_signal, label="Signal benchmark")
+        plt.title("Backtest: Return")
+        plt.xlabel("Step")
+        plt.ylabel("Wealth")
+        plt.legend()
+        plt.grid(True)
+        # plot_path = os.path.join(self.output_dir, f"backtest_plot_{ts}.png")
+        # plt.savefig(plot_path, dpi=200)
+        plt.show()
+        plt.close()
